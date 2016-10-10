@@ -2,6 +2,7 @@ FROM golang
 
 ENV PATH /usr/local/go/bin:$PATH
 ENV GOPATH /gopath
+ENV UNDER_DOCKER true
 
 WORKDIR /gopath/src/github.com/coreos/registry-monitor
 RUN mkdir -p /gopath/src/github.com/coreos/registry-monitor

@@ -3,20 +3,30 @@ package main
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"flag"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/service/cloudwatch"
+	"github.com/coreos/pkg/flagutil"
 	"github.com/fsouza/go-dockerclient"
+	"github.com/prometheus/client_golang/prometheus"
+
+	log "github.com/Sirupsen/logrus"
 )
+
+var listen = flag.String("listen", ":8000", "")
+var level = flag.String("loglevel", "info", "default log level: debug, info, warn, error, fatal, panic")
+var dockerUsername = flag.String("username", "", "Registry username for pulling and pushing")
+var dockerPassword = flag.String("password", "", "Registry password for pulling and pushing")
+var registryHost = flag.String("registry-host", "", "Hostname of the registry being monitored")
+var repository = flag.String("repository", "", "Repository on the registry to pull and push")
+var baseLayer = flag.String("base-layer-id", "", "Docker V1 ID of the base layer in the repository")
 
 var (
 	healthy bool
@@ -24,28 +34,44 @@ var (
 )
 
 var (
-	dockerUsername = os.Getenv("USERNAME")
-	dockerPassword = os.Getenv("PASSWORD")
-	registryName   = os.Getenv("REGISTRY_HOST")
-	repository     = os.Getenv("REPOSITORY_NAME")
-	baseLayer      = os.Getenv("BASE_IMAGE_ID")
+	promNamespace = os.Getenv("PROMETHEUS_NAMESPACE")
 
-	cloudwatchNamespace = os.Getenv("CLOUDWATCH_NAMESPACE")
-	cloudwatchSuccess   = "MonitorSuccess"
-	cloudwatchFailure   = "MonitorFailure"
-	cloudwatchPushTime  = "MonitorPushTime"
-	cloudwatchPullTime  = "MonitorPullTime"
+	promSuccessMetric = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: promNamespace,
+		Subsystem: "",
+		Name:      "monitor_success",
+		Help:      "The registry monitor successfully completed a pull and push operation",
+	}, []string{})
 
-	awsAccessKey = os.Getenv("AWS_ACCESS_KEY_ID")
-	awsSecretKey = os.Getenv("AWS_SECRET_ACCESS_KEY")
-	awsRegion    = os.Getenv("AWS_DEFAULT_REGION")
+	promFailureMetric = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: promNamespace,
+		Subsystem: "",
+		Name:      "monitor_failure",
+		Help:      "The registry monitor failed to complete a pull and push operation",
+	}, []string{})
+
+	promPushMetric = prometheus.NewSummary(prometheus.SummaryOpts{
+		Namespace: promNamespace,
+		Subsystem: "",
+		Name:      "monitor_push",
+		Help:      "The time for the monitor push operation",
+	})
+
+	promPullMetric = prometheus.NewSummary(prometheus.SummaryOpts{
+		Namespace: promNamespace,
+		Subsystem: "",
+		Name:      "monitor_pull",
+		Help:      "The time for the monitor pull operation",
+	})
 )
+
+var prometheusMetrics = []prometheus.Collector{promSuccessMetric, promFailureMetric, promPullMetric, promPushMetric}
 
 type LoggingWriter struct{}
 
 func (w *LoggingWriter) Write(p []byte) (n int, err error) {
 	s := string(p)
-	log.Printf("%s", s)
+	log.Infof("%s", s)
 	return len(s), nil
 }
 
@@ -132,7 +158,7 @@ func stringInSlice(value string, list []string) bool {
 
 func verifyDockerClient(dockerClient *docker.Client) bool {
 	if err := dockerClient.Ping(); err != nil {
-		log.Printf("%s", err)
+		log.Errorf("%s", err)
 		healthy = false
 		return false
 	}
@@ -147,7 +173,7 @@ func clearAllContainers(dockerClient *docker.Client) bool {
 
 	containers, err := dockerClient.ListContainers(listOptions)
 	if err != nil {
-		log.Printf("%s", err)
+		log.Errorf("%s", err)
 		healthy = false
 		return false
 	}
@@ -164,7 +190,7 @@ func clearAllContainers(dockerClient *docker.Client) bool {
 		}
 
 		if err = dockerClient.RemoveContainer(removeOptions); err != nil {
-			log.Printf("%s", err)
+			log.Errorf("%s", err)
 			healthy = false
 			return false
 		}
@@ -177,50 +203,83 @@ func clearAllImages(dockerClient *docker.Client) bool {
 	// Note: We delete in a loop like this because deleting one
 	// image can lead to others being deleted. Therefore, we just
 	// loop until the images list are empty.
+
+	skipImages := map[string]bool{}
+
 	for {
+		// List all Docker images.
 		listOptions := docker.ListImagesOptions{
 			All: true,
 		}
 
+		log.Infof("Listing Docker images")
 		images, err := dockerClient.ListImages(listOptions)
 		if err != nil {
-			log.Printf("%s", err)
+			log.Errorf("%s", err)
 			healthy = false
 			return false
 		}
 
-		if len(images) == 0 {
+		// Determine if we need to remove any images.
+		imagesFound := false
+		for _, image := range images {
+			if _, toSkip := skipImages[image.ID]; toSkip {
+				continue
+			}
+
+			imagesFound = true
+		}
+
+		if !imagesFound {
 			return healthy
 		}
 
+		// Remove images.
+		removedImages := false
 		for _, image := range images[:1] {
-			log.Printf("Clearing image %s", image.ID)
-			if err = dockerClient.RemoveImage(image.ID); err != nil {
-				log.Printf("%s", err)
-				healthy = false
-				return false
+			if _, toSkip := skipImages[image.ID]; toSkip {
+				continue
 			}
+
+			log.Infof("Clearing image %s", image.ID)
+			if err = dockerClient.RemoveImage(image.ID); err != nil {
+				if strings.ToLower(os.Getenv("UNDER_DOCKER")) != "true" {
+					log.Errorf("%s", err)
+					healthy = false
+					return false
+				} else {
+					log.Warningf("Skipping deleting image %v", image.ID)
+					skipImages[image.ID] = true
+					continue
+				}
+			}
+
+			removedImages = true
+		}
+
+		if !removedImages {
+			break
 		}
 	}
 
-	return healthy
+	return true
 }
 
 func pullTestImage(dockerClient *docker.Client) bool {
 	pullOptions := docker.PullImageOptions{
-		Repository:   repository,
+		Repository:   *repository,
 		Registry:     "quay.io",
 		Tag:          "latest",
 		OutputStream: &LoggingWriter{},
 	}
 
 	pullAuth := docker.AuthConfiguration{
-		Username: dockerUsername,
-		Password: dockerPassword,
+		Username: *dockerUsername,
+		Password: *dockerPassword,
 	}
 
 	if err := dockerClient.PullImage(pullOptions, pullAuth); err != nil {
-		log.Printf("Pull Error: %s", err)
+		log.Errorf("Pull Error: %s", err)
 		status = false
 		return false
 	}
@@ -229,18 +288,18 @@ func pullTestImage(dockerClient *docker.Client) bool {
 }
 
 func deleteTopLayer(dockerClient *docker.Client) bool {
-	imageHistory, err := dockerClient.ImageHistory(repository)
+	imageHistory, err := dockerClient.ImageHistory(*repository)
 	if err != nil {
-		log.Printf("%s", err)
+		log.Errorf("%s", err)
 		healthy = false
 		return false
 	}
 
 	for _, image := range imageHistory {
 		if stringInSlice("latest", image.Tags) {
-			log.Printf("Deleting image %s", image.ID)
+			log.Infof("Deleting image %s", image.ID)
 			if err = dockerClient.RemoveImage(image.ID); err != nil {
-				log.Printf("%s", err)
+				log.Errorf("%s", err)
 				healthy = false
 				return false
 			}
@@ -256,7 +315,7 @@ func createTagLayer(dockerClient *docker.Client) bool {
 	timestamp := t.Format("2006-01-02 15:04:05 -0700")
 
 	config := &docker.Config{
-		Image: baseLayer,
+		Image: *baseLayer,
 		Cmd:   []string{"sh", "echo", "\"" + timestamp + "\" > foo"},
 	}
 
@@ -266,20 +325,20 @@ func createTagLayer(dockerClient *docker.Client) bool {
 	}
 
 	if _, err := dockerClient.CreateContainer(options); err != nil {
-		log.Printf("Create Container: %s", err)
+		log.Infof("Create Container: %s", err)
 		healthy = false
 		return false
 	}
 
 	commitOptions := docker.CommitContainerOptions{
 		Container:  "updatedcontainer",
-		Repository: repository,
+		Repository: *repository,
 		Tag:        "latest",
 		Message:    "Updated at " + timestamp,
 	}
 
 	if _, err := dockerClient.CommitContainer(commitOptions); err != nil {
-		log.Printf("Commit Container: %s", err)
+		log.Infof("Commit Container: %s", err)
 		healthy = false
 		return false
 	}
@@ -289,19 +348,19 @@ func createTagLayer(dockerClient *docker.Client) bool {
 
 func pushTestImage(dockerClient *docker.Client) bool {
 	pushOptions := docker.PushImageOptions{
-		Name:         repository,
-		Registry:     registryName,
+		Name:         *repository,
+		Registry:     *registryHost,
 		Tag:          "latest",
 		OutputStream: &LoggingWriter{},
 	}
 
 	pushAuth := docker.AuthConfiguration{
-		Username: dockerUsername,
-		Password: dockerPassword,
+		Username: *dockerUsername,
+		Password: *dockerPassword,
 	}
 
 	if err := dockerClient.PushImage(pushOptions, pushAuth); err != nil {
-		log.Printf("Push Error: %s", err)
+		log.Errorf("Push Error: %s", err)
 		status = false
 		return false
 	}
@@ -310,61 +369,69 @@ func pushTestImage(dockerClient *docker.Client) bool {
 	return true
 }
 
-func putMetric(metricName string, watchService *cloudwatch.CloudWatch, unitName string, metricValue float64) {
-	if watchService == nil {
-		return
+func main() {
+	// Parse the command line flags.
+	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
+	if err := flagutil.SetFlagsFromEnv(flag.CommandLine, "REGISTRY_MONITOR"); err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
 	}
 
-	params := &cloudwatch.PutMetricDataInput{
-		MetricData: []*cloudwatch.MetricDatum{
-			&cloudwatch.MetricDatum{
-				MetricName: aws.String(metricName),
-				Timestamp:  aws.Time(time.Now()),
-				Unit:       aws.String(unitName),
-				Value:      aws.Float64(metricValue),
-			},
-		},
-		Namespace: aws.String(cloudwatchNamespace),
-	}
-
-	_, err := watchService.PutMetricData(params)
+	lvl, err := log.ParseLevel(*level)
 	if err != nil {
-		log.Printf("Failure to put cloudwatch metric: %s", err)
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
 	}
+
+	log.SetLevel(lvl)
+
+	// Ensure we have proper values.
+	if *dockerUsername == "" {
+		log.Fatalln("Missing username flag")
+	}
+
+	if *dockerPassword == "" {
+		log.Fatalln("Missing password flag")
+	}
+
+	if *registryHost == "" {
+		log.Fatalln("Missing registry-host flag")
+	}
+
+	if *repository == "" {
+		log.Fatalln("Missing repository flag")
+	}
+
+	if *baseLayer == "" {
+		log.Fatalln("Missing base-layer-id flag")
+	}
+
+	// Register the metrics.
+	for _, metric := range prometheusMetrics {
+		err := prometheus.Register(metric)
+		if err != nil {
+			log.Fatalf("Failed to register metric: %v", err)
+		}
+	}
+
+	// Setup the HTTP server.
+	http.Handle("/metrics", prometheus.Handler())
+	http.HandleFunc("/health", healthHandler)
+	http.HandleFunc("/status", statusHandler)
+
+	log.Infoln("Listening on", *listen)
+
+	// Run the monitor routine.
+	runMonitor()
+
+	// Listen and serve.
+	log.Fatal(http.ListenAndServe(*listen, nil))
 }
 
-func main() {
-	if dockerUsername == "" {
-		fmt.Println("Missing USERNAME env var")
-		return
-	}
-
-	if dockerPassword == "" {
-		fmt.Println("Missing PASSWORD env var")
-		return
-	}
-
-	if registryName == "" {
-		fmt.Println("Missing REGISTRY_HOST env var")
-		return
-	}
-
-	if repository == "" {
-		fmt.Println("Missing REPOSITORY_NAME env var")
-		return
-	}
-
-	if baseLayer == "" {
-		fmt.Println("Missing BASE_IMAGE_ID env var")
-		return
-	}
-
-	var watchService *cloudwatch.CloudWatch = nil
-	if awsAccessKey != "" && awsSecretKey != "" && awsRegion != "" && cloudwatchNamespace != "" {
-		aws_creds := credentials.NewStaticCredentials(awsAccessKey, awsSecretKey, "")
-		watchService = cloudwatch.New(&aws.Config{Region: aws.String(awsRegion), Credentials: aws_creds})
-	}
-
+func runMonitor() {
 	dockerHost := os.Getenv("DOCKER_HOST")
 	if dockerHost == "" {
 		dockerHost = "unix:///var/run/docker.sock"
@@ -377,73 +444,92 @@ func main() {
 
 		for {
 			if !firstLoop {
-				log.Printf("Sleeping for %v", duration)
+				log.Infof("Sleeping for %v", duration)
 				time.Sleep(duration)
 			}
 
-			log.Printf("Starting test")
+			log.Infof("Starting test")
 			firstLoop = false
 			status = true
 
-			log.Printf("Trying docker host: %s", dockerHost)
+			log.Infof("Trying docker host: %s", dockerHost)
 			dockerClient, err := newDockerClient(dockerHost)
 			if err != nil {
-				log.Printf("%s", err)
+				log.Errorf("%s", err)
 				healthy = false
 				return
 			}
 
-			log.Printf("Clearing all containers")
-			if !clearAllContainers(dockerClient) {
-				return
+			if strings.ToLower(os.Getenv("UNDER_DOCKER")) != "true" {
+				log.Infof("Clearing all containers")
+				if !clearAllContainers(dockerClient) {
+					return
+				}
 			}
 
-			log.Printf("Clearing all images")
+			log.Infof("Clearing all images")
 			if !clearAllImages(dockerClient) {
 				return
 			}
 
-			log.Printf("Pulling test image")
+			log.Infof("Pulling test image")
 			pullStartTime := time.Now()
 			if !pullTestImage(dockerClient) {
 				duration = 30 * time.Second
-				putMetric(cloudwatchFailure, watchService, "Count", 1)
+
+				// Write the failure metric.
+				m, err := promFailureMetric.GetMetricWithLabelValues()
+				if err != nil {
+					panic(err)
+				}
+
+				m.Inc()
 				continue
 			}
-			putMetric(cloudwatchPullTime, watchService, "Seconds", time.Since(pullStartTime).Seconds())
 
-			log.Printf("Deleting top layer")
+			// Write the pull time metric.
+			promPullMetric.Observe(time.Since(pullStartTime).Seconds())
+
+			log.Infof("Deleting top layer")
 			if !deleteTopLayer(dockerClient) {
 				return
 			}
 
-			log.Printf("Creating new top layer")
+			log.Infof("Creating new top layer")
 			if !createTagLayer(dockerClient) {
 				return
 			}
 
-			log.Printf("Pushing test image")
+			log.Infof("Pushing test image")
 			pushStartTime := time.Now()
 			if !pushTestImage(dockerClient) {
 				duration = 30 * time.Second
-				putMetric(cloudwatchFailure, watchService, "Count", 1)
+				// Write the failure metric.
+				m, err := promFailureMetric.GetMetricWithLabelValues()
+				if err != nil {
+					panic(err)
+				}
+
+				m.Inc()
+
 				continue
 			}
-			putMetric(cloudwatchPushTime, watchService, "Seconds", time.Since(pushStartTime).Seconds())
 
-			log.Printf("Test successful")
+			// Write the push time metric.
+			promPushMetric.Observe(time.Since(pushStartTime).Seconds())
+
+			log.Infof("Test successful")
 			duration = 2 * time.Minute
-			putMetric(cloudwatchSuccess, watchService, "Count", 1)
+
+			// Write the success metric.
+			m, err := promSuccessMetric.GetMetricWithLabelValues()
+			if err != nil {
+				panic(err)
+			}
+
+			m.Inc()
 		}
 	}
 
 	go mainLoop()
-
-	// Run a simple HTTP server to report health and status.
-	healthy = true
-	status = true
-
-	http.HandleFunc("/health", healthHandler)
-	http.HandleFunc("/status", statusHandler)
-	http.ListenAndServe(":8000", nil)
 }

@@ -15,7 +15,6 @@ To run the monitor, execute the following command with the flag values replaced:
 | registry-host         | The registry hostname. Example: quay.io                           |
 | repository            | The full name of the repository. Example: quay.io/some/repository |
 | base-image-id         | The Docker V1 ID of an image in the repository to use as the base |
-| --------------------- | ----------------------------------------------------------------- |
 
 ```sh
 ./registry-monitor -username=USERNAME -password=PASSWORD -registry-host=REGISTRYHOST -repository=registryname/some/repository -base-layer-id=DOCKERV1ID

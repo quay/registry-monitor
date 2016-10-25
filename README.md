@@ -23,13 +23,13 @@ To run the monitor, execute the following command with the flag values replaced:
 The monitor can also be run itself via Docker:
 
 ```sh
-docker run --privileged -v /var/run/docker.sock:/var/run/docker.sock -p 8000:8000 registry-monitor -username=USERNAME -password=PASSWORD -registry-host=REGISTRYHOST -repository=registryname/some/repository -base-layer-id=DOCKERV1ID
+docker run --privileged -e UNDER_DOCKER=true -v /var/run/docker.sock:/var/run/docker.sock -p 8000:8000 registry-monitor -username=USERNAME -password=PASSWORD -registry-host=REGISTRYHOST -repository=registryname/some/repository -base-layer-id=DOCKERV1ID
 ```
 
 Docker Example:
 
 ```sh
-docker run --privileged -v /var/run/docker.sock:/var/run/docker.sock -p 8000:8000 registry-monitor -username=myuser+robot -password=myrobottoken -registry-host=quay.io -repository=quay.io/myuser/monitorrepo -base-layer-id=4f83eba78c
+docker run --privileged -e UNDER_DOCKER=true -v /var/run/docker.sock:/var/run/docker.sock -p 8000:8000 registry-monitor -username=myuser+robot -password=myrobottoken -registry-host=quay.io -repository=quay.io/myuser/monitorrepo -base-layer-id=4f83eba78c
 ```
 
 Reading the monitor

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,31 +119,15 @@ func buildTLSTransport(basePath string) (*http.Transport, error) {
 }
 
 func newDockerClient(dockerHost string) (*docker.Client, error) {
-	host, err := url.Parse(dockerHost)
-	if err != nil {
-		return nil, err
+	if os.Getenv("DOCKER_CERT_PATH") == "" {
+		return docker.NewClient(dockerHost)
 	}
 
-	// Change to an https connection if we have a cert path.
-	if os.Getenv("DOCKER_CERT_PATH") != "" {
-		host.Scheme = "https"
-	}
-
-	c, err := docker.NewClient(host.String())
-	if err != nil {
-		return nil, err
-	}
-
-	if os.Getenv("DOCKER_CERT_PATH") != "" {
-		transport, err := buildTLSTransport(os.Getenv("DOCKER_CERT_PATH"))
-		if err != nil {
-			return nil, err
-		}
-
-		c.HTTPClient = &http.Client{Transport: transport}
-	}
-
-	return c, nil
+	cert_path := os.Getenv("DOCKER_CERT_PATH")
+	ca := fmt.Sprintf("%s/ca.pem", cert_path)
+	cert := fmt.Sprintf("%s/cert.pem", cert_path)
+	key := fmt.Sprintf("%s/key.pem", cert_path)
+	return docker.NewTLSClient(dockerHost, cert, key, ca)
 }
 
 func stringInSlice(value string, list []string) bool {
@@ -157,12 +140,14 @@ func stringInSlice(value string, list []string) bool {
 }
 
 func verifyDockerClient(dockerClient *docker.Client) bool {
+	log.Infof("Trying to connect to Docker client")
 	if err := dockerClient.Ping(); err != nil {
-		log.Errorf("%s", err)
+		log.Errorf("Error connecting to Docker client: %s", err)
 		healthy = false
 		return false
 	}
 
+	log.Infof("Docker client valid")
 	return true
 }
 
@@ -171,9 +156,10 @@ func clearAllContainers(dockerClient *docker.Client) bool {
 		All: true,
 	}
 
+	log.Infof("Listing all containers")
 	containers, err := dockerClient.ListContainers(listOptions)
 	if err != nil {
-		log.Errorf("%s", err)
+		log.Errorf("Error listing containers: %s", err)
 		healthy = false
 		return false
 	}
@@ -183,6 +169,7 @@ func clearAllContainers(dockerClient *docker.Client) bool {
 			continue
 		}
 
+		log.Infof("Removing container: %s", container.ID)
 		removeOptions := docker.RemoveContainerOptions{
 			ID:            container.ID,
 			RemoveVolumes: true,
@@ -190,7 +177,7 @@ func clearAllContainers(dockerClient *docker.Client) bool {
 		}
 
 		if err = dockerClient.RemoveContainer(removeOptions); err != nil {
-			log.Errorf("%s", err)
+			log.Errorf("Error removing container: %s", err)
 			healthy = false
 			return false
 		}
@@ -212,10 +199,10 @@ func clearAllImages(dockerClient *docker.Client) bool {
 			All: true,
 		}
 
-		log.Infof("Listing Docker images")
+		log.Infof("Listing docker images")
 		images, err := dockerClient.ListImages(listOptions)
 		if err != nil {
-			log.Errorf("%s", err)
+			log.Errorf("Could not list images: %s", err)
 			healthy = false
 			return false
 		}
@@ -320,12 +307,11 @@ func createTagLayer(dockerClient *docker.Client) bool {
 	}
 
 	options := docker.CreateContainerOptions{
-		Name:   "updatedcontainer",
 		Config: config,
 	}
 
 	if _, err := dockerClient.CreateContainer(options); err != nil {
-		log.Infof("Create Container: %s", err)
+		log.Errorf("Error creating container: %s", err)
 		healthy = false
 		return false
 	}
@@ -338,7 +324,7 @@ func createTagLayer(dockerClient *docker.Client) bool {
 	}
 
 	if _, err := dockerClient.CommitContainer(commitOptions); err != nil {
-		log.Infof("Commit Container: %s", err)
+		log.Errorf("Error committing Container: %s", err)
 		healthy = false
 		return false
 	}
@@ -438,6 +424,7 @@ func runMonitor() {
 	}
 
 	firstLoop := true
+	healthy = true
 
 	mainLoop := func() {
 		duration := 2 * time.Minute
@@ -457,6 +444,10 @@ func runMonitor() {
 			if err != nil {
 				log.Errorf("%s", err)
 				healthy = false
+				return
+			}
+
+			if !verifyDockerClient(dockerClient) {
 				return
 			}
 

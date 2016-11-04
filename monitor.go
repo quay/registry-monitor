@@ -306,7 +306,11 @@ func createTagLayer(dockerClient *docker.Client) bool {
 		Cmd:   []string{"sh", "echo", "\"" + timestamp + "\" > foo"},
 	}
 
+	container_name := fmt.Sprintf("updatedcontainer%v", time.Now().Unix())
+	log.Infof("Creating new image via container %v", container_name)
+
 	options := docker.CreateContainerOptions{
+		Name:   container_name,
 		Config: config,
 	}
 
@@ -317,7 +321,7 @@ func createTagLayer(dockerClient *docker.Client) bool {
 	}
 
 	commitOptions := docker.CommitContainerOptions{
-		Container:  "updatedcontainer",
+		Container:  container_name,
 		Repository: *repository,
 		Tag:        "latest",
 		Message:    "Updated at " + timestamp,
@@ -325,6 +329,19 @@ func createTagLayer(dockerClient *docker.Client) bool {
 
 	if _, err := dockerClient.CommitContainer(commitOptions); err != nil {
 		log.Errorf("Error committing Container: %s", err)
+		healthy = false
+		return false
+	}
+
+	log.Infof("Removing container: %s", container_name)
+	removeOptions := docker.RemoveContainerOptions{
+		ID:            container_name,
+		RemoveVolumes: true,
+		Force:         true,
+	}
+
+	if err := dockerClient.RemoveContainer(removeOptions); err != nil {
+		log.Errorf("Error removing container: %s", err)
 		healthy = false
 		return false
 	}

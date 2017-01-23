@@ -26,6 +26,7 @@ var dockerPassword = flag.String("password", "", "Registry password for pulling 
 var registryHost = flag.String("registry-host", "", "Hostname of the registry being monitored")
 var repository = flag.String("repository", "", "Repository on the registry to pull and push")
 var baseLayer = flag.String("base-layer-id", "", "Docker V1 ID of the base layer in the repository")
+var testInterval = flag.String("run-test-every", "", "the time between test in minutes")
 
 var (
 	healthy bool
@@ -444,7 +445,7 @@ func runMonitor() {
 	healthy = true
 
 	mainLoop := func() {
-		duration := 2 * time.Minute
+		duration := *testInterval * time.Minute
 
 		for {
 			if !firstLoop {

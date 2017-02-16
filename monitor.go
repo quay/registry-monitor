@@ -25,7 +25,6 @@ var dockerUsername = flag.String("username", "", "Registry username for pulling 
 var dockerPassword = flag.String("password", "", "Registry password for pulling and pushing")
 var registryHost = flag.String("registry-host", "", "Hostname of the registry being monitored")
 var repository = flag.String("repository", "", "Repository on the registry to pull and push")
-var baseLayer = flag.String("base-layer-id", "", "Docker V1 ID of the base layer in the repository")
 var testInterval = flag.String("run-test-every", "2m", "the time between test in minutes")
 
 var (
@@ -302,8 +301,14 @@ func createTagLayer(dockerClient *docker.Client) bool {
 	t := time.Now().Local()
 	timestamp := t.Format("2006-01-02 15:04:05 -0700")
 
+	//Grab the conatiner ID
+	grabId, err := dockerClient.ImageHistory(*repository)
+	if err != nil {
+		log.Fatalf("Failed grab image ID: %v", err)
+	}
+	baseLayer := grabId[0]
 	config := &docker.Config{
-		Image: *baseLayer,
+		Image: baseLayer.ID,
 		Cmd:   []string{"sh", "echo", "\"" + timestamp + "\" > foo"},
 	}
 
@@ -409,10 +414,6 @@ func main() {
 		log.Fatalln("Missing repository flag")
 	}
 
-	if *baseLayer == "" {
-		log.Fatalln("Missing base-layer-id flag")
-	}
-
 	// Register the metrics.
 	for _, metric := range prometheusMetrics {
 		err := prometheus.Register(metric)
@@ -443,7 +444,6 @@ func runMonitor() {
 
 	firstLoop := true
 	healthy = true
-
 	mainLoop := func() {
 		duration, err := time.ParseDuration(*testInterval)
 		if err != nil {

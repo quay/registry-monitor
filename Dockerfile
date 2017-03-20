@@ -1,14 +1,6 @@
-FROM golang
+FROM alpine:3.5
 
-ENV PATH /usr/local/go/bin:$PATH
-ENV GOPATH /gopath
 ENV UNDER_DOCKER true
 
-WORKDIR /gopath/src/github.com/coreos/registry-monitor
-RUN mkdir -p /gopath/src/github.com/coreos/registry-monitor
-ADD monitor.go /gopath/src/github.com/coreos/registry-monitor/monitor.go
-
-RUN go get -v ./...
-RUN CGO_ENABLED=0 GOOS=linux go build -a -tags netgo -ldflags '-w' monitor.go
-
-ENTRYPOINT ["./monitor"]
+COPY bin/monitor /usr/local/bin
+ENTRYPOINT ["monitor"]

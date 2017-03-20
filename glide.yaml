@@ -1,0 +1,13 @@
+package: github.com/coreos/registry-monitor
+import:
+- package: github.com/Sirupsen/logrus
+  version: ^0.11.5
+- package: github.com/coreos/pkg
+  version: ^3.0.0
+  subpackages:
+  - flagutil
+- package: github.com/prometheus/client_golang
+  version: ^0.8.0
+  subpackages:
+  - prometheus
+- package: github.com/fsouza/go-dockerclient

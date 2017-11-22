@@ -16,7 +16,7 @@ import (
 	"github.com/fsouza/go-dockerclient"
 	"github.com/prometheus/client_golang/prometheus"
 
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 )
 
 var listen = flag.String("listen", ":8000", "")
@@ -25,9 +25,13 @@ var dockerUsername = flag.String("username", "", "Registry username for pulling 
 var dockerPassword = flag.String("password", "", "Registry password for pulling and pushing")
 var registryHost = flag.String("registry-host", "", "Hostname of the registry being monitored")
 var repository = flag.String("repository", "", "Repository on the registry to pull and push")
+var baseImage = flag.String("base-image", "", "Repository to use as base image for push image; instead of base-layer-id")
+var publicBase = flag.Bool("public-base", false, "Is the base image public or private (default: false)")
+var baseLayer = flag.String("base-layer-id", "", "Docker V1 ID of the base layer in the repository; instead of base-image")
 var testInterval = flag.String("run-test-every", "2m", "the time between test in minutes")
 
 var (
+	base    string
 	healthy bool
 	status  bool
 )
@@ -274,6 +278,32 @@ func pullTestImage(dockerClient *docker.Client) bool {
 	return true
 }
 
+func pullBaseImage(dockerClient *docker.Client) bool {
+	pullOptions := docker.PullImageOptions{
+		Repository:   *baseImage,
+		Tag:          "latest",
+		OutputStream: &LoggingWriter{},
+	}
+
+	var pullAuth docker.AuthConfiguration
+	if *publicBase {
+		pullAuth = docker.AuthConfiguration{}
+	} else {
+		pullAuth = docker.AuthConfiguration{
+			Username: *dockerUsername,
+			Password: *dockerPassword,
+		}
+	}
+
+	if err := dockerClient.PullImage(pullOptions, pullAuth); err != nil {
+		log.Errorf("Pull Error: %s", err)
+		status = false
+		return false
+	}
+
+	return true
+}
+
 func deleteTopLayer(dockerClient *docker.Client) bool {
 	imageHistory, err := dockerClient.ImageHistory(*repository)
 	if err != nil {
@@ -300,15 +330,9 @@ func deleteTopLayer(dockerClient *docker.Client) bool {
 func createTagLayer(dockerClient *docker.Client) bool {
 	t := time.Now().Local()
 	timestamp := t.Format("2006-01-02 15:04:05 -0700")
-
-	//Grab the conatiner ID
-	grabId, err := dockerClient.ImageHistory(*repository)
-	if err != nil {
-		log.Fatalf("Failed grab image ID: %v", err)
-	}
-	baseLayer := grabId[0]
+  
 	config := &docker.Config{
-		Image: baseLayer.ID,
+		Image: base,
 		Cmd:   []string{"sh", "echo", "\"" + timestamp + "\" > foo"},
 	}
 
@@ -414,6 +438,17 @@ func main() {
 		log.Fatalln("Missing repository flag")
 	}
 
+	if *baseImage == "" && *baseLayer == "" {
+		log.Fatalln("Missing base-image and base-layer-id flag; Dynamically assinging base-layer")
+	  grabId, err := dockerClient.ImageHistory(*repository)
+	  if err != nil {
+		  log.Fatalln("Failed grab image ID: %v", err)
+	  }
+	  *baseLayer = grabId[0]
+	} else if *baseImage != "" && *baseLayer != "" {
+		log.Fatalln("Both base-image and base-layer-id flag; only one of required")
+	}
+
 	// Register the metrics.
 	for _, metric := range prometheusMetrics {
 		err := prometheus.Register(metric)
@@ -501,6 +536,16 @@ func runMonitor() {
 
 			// Write the pull time metric.
 			promPullMetric.Observe(time.Since(pullStartTime).Seconds())
+
+			if *baseImage != "" {
+				log.Infof("Pulling specified base image")
+				if !pullBaseImage(dockerClient) {
+					return
+				}
+				base = *baseImage
+			} else {
+				base = *baseLayer
+			}
 
 			log.Infof("Deleting top layer")
 			if !deleteTopLayer(dockerClient) {

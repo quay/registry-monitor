@@ -330,7 +330,7 @@ func deleteTopLayer(dockerClient *docker.Client) bool {
 func createTagLayer(dockerClient *docker.Client) bool {
 	t := time.Now().Local()
 	timestamp := t.Format("2006-01-02 15:04:05 -0700")
-  
+
 	config := &docker.Config{
 		Image: base,
 		Cmd:   []string{"sh", "echo", "\"" + timestamp + "\" > foo"},
@@ -439,12 +439,12 @@ func main() {
 	}
 
 	if *baseImage == "" && *baseLayer == "" {
-		log.Fatalln("Missing base-image and base-layer-id flag; Dynamically assinging base-layer")
-	  grabId, err := dockerClient.ImageHistory(*repository)
-	  if err != nil {
-		  log.Fatalln("Failed grab image ID: %v", err)
-	  }
-	  *baseLayer = grabId[0]
+		log.Infof("Missing base-image and base-layer-id flag; Dynamically assinging base-layer")
+		grabID, err := dockerClient.ImageHistory(*repository)
+		if err != nil {
+			log.Fatalln("Failed grab image ID: %v", err)
+		}
+		*baseLayer = grabID[0]
 	} else if *baseImage != "" && *baseLayer != "" {
 		log.Fatalln("Both base-image and base-layer-id flag; only one of required")
 	}

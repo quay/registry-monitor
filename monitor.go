@@ -439,7 +439,13 @@ func main() {
 	}
 
 	if *baseImage == "" && *baseLayer == "" {
-		log.Fatalln("Missing base-image and base-layer-id flag; only one of required")
+		log.Infof("Missing base-image and base-layer-id flag; Dynamically assinging base-layer-id")
+		grabID, err := dockerClient.ImageHistory(*repository)
+		if err != nil {
+			log.Fatalln("Failed grab image ID: %v", err)
+		}
+		log.Infof("Assigning base-layer-id to %s", grabID[0])
+		*baseLayer = grabID[0]
 	} else if *baseImage != "" && *baseLayer != "" {
 		log.Fatalln("Both base-image and base-layer-id flag; only one of required")
 	}
@@ -474,7 +480,6 @@ func runMonitor() {
 
 	firstLoop := true
 	healthy = true
-
 	mainLoop := func() {
 		duration, err := time.ParseDuration(*testInterval)
 		if err != nil {

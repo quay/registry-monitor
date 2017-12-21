@@ -31,9 +31,10 @@ var baseLayer = flag.String("base-layer-id", "", "Docker V1 ID of the base layer
 var testInterval = flag.String("run-test-every", "2m", "the time between test in minutes")
 
 var (
-	base    string
-	healthy bool
-	status  bool
+	base         string
+	dockerClient *docker.Client
+	healthy      bool
+	status       bool
 )
 
 var (
@@ -306,7 +307,7 @@ func pullBaseImage(dockerClient *docker.Client) bool {
 
 func deleteTopLayer(dockerClient *docker.Client) bool {
 	imageHistory, err := dockerClient.ImageHistory(*repository)
-	if err != nil {
+	if err != nil && err.Error() != "no such image" {
 		log.Errorf("%s", err)
 		healthy = false
 		return false
@@ -445,7 +446,7 @@ func main() {
 			log.Fatalln("Failed grab image ID: %v", err)
 		}
 		log.Infof("Assigning base-layer-id to %s", grabID[0])
-		*baseLayer = grabID[0]
+		*baseLayer = grabID[0].ID
 	} else if *baseImage != "" && *baseLayer != "" {
 		log.Fatalln("Both base-image and base-layer-id flag; only one of required")
 	}
@@ -496,12 +497,14 @@ func runMonitor() {
 			firstLoop = false
 			status = true
 
-			log.Infof("Trying docker host: %s", dockerHost)
-			dockerClient, err := newDockerClient(dockerHost)
-			if err != nil {
-				log.Errorf("%s", err)
-				healthy = false
-				return
+			if dockerClient == nil || !verifyDockerClient(dockerClient) {
+				log.Infof("Trying docker host: %s", dockerHost)
+				dockerClient, err = newDockerClient(dockerHost)
+				if err != nil {
+					log.Errorf("%s", err)
+					healthy = false
+					return
+				}
 			}
 
 			if !verifyDockerClient(dockerClient) {

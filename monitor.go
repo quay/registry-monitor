@@ -33,6 +33,7 @@ var testInterval = flag.String("run-test-every", "2m", "the time between test in
 var (
 	base         string
 	dockerClient *docker.Client
+	dockerHost   string
 	healthy      bool
 	status       bool
 )
@@ -123,7 +124,7 @@ func buildTLSTransport(basePath string) (*http.Transport, error) {
 	}, nil
 }
 
-func newDockerClient(dockerHost string) (*docker.Client, error) {
+func newDockerClient() (*docker.Client, error) {
 	if os.Getenv("DOCKER_CERT_PATH") == "" {
 		return docker.NewClient(dockerHost)
 	}
@@ -307,7 +308,7 @@ func pullBaseImage(dockerClient *docker.Client) bool {
 
 func deleteTopLayer(dockerClient *docker.Client) bool {
 	imageHistory, err := dockerClient.ImageHistory(*repository)
-	if err != nil && err.Error() != "no such image" {
+	if err != nil && err != docker.ErrNoSuchImage {
 		log.Errorf("%s", err)
 		healthy = false
 		return false
@@ -403,6 +404,20 @@ func pushTestImage(dockerClient *docker.Client) bool {
 	return true
 }
 
+func init() {
+	dockerHost = os.Getenv("DOCKER_HOST")
+	if dockerHost == "" {
+		dockerHost = "unix:///var/run/docker.sock"
+	}
+
+	var err error
+	dockerClient, err = newDockerClient()
+	if err != nil {
+		log.Fatalf("%s", err)
+	}
+
+}
+
 func main() {
 	// Parse the command line flags.
 	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
@@ -445,7 +460,7 @@ func main() {
 		if err != nil {
 			log.Fatalln("Failed grab image ID: %v", err)
 		}
-		log.Infof("Assigning base-layer-id to %s", grabID[0])
+		log.Infof("Assigning base-layer-id to %s", grabID[0].ID)
 		*baseLayer = grabID[0].ID
 	} else if *baseImage != "" && *baseLayer != "" {
 		log.Fatalln("Both base-image and base-layer-id flag; only one of required")
@@ -474,11 +489,6 @@ func main() {
 }
 
 func runMonitor() {
-	dockerHost := os.Getenv("DOCKER_HOST")
-	if dockerHost == "" {
-		dockerHost = "unix:///var/run/docker.sock"
-	}
-
 	firstLoop := true
 	healthy = true
 	mainLoop := func() {
@@ -499,7 +509,7 @@ func runMonitor() {
 
 			if dockerClient == nil || !verifyDockerClient(dockerClient) {
 				log.Infof("Trying docker host: %s", dockerHost)
-				dockerClient, err = newDockerClient(dockerHost)
+				dockerClient, err = newDockerClient()
 				if err != nil {
 					log.Errorf("%s", err)
 					healthy = false

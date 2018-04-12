@@ -261,7 +261,7 @@ func clearAllImages(dockerClient *docker.Client) bool {
 func pullTestImage(dockerClient *docker.Client) bool {
 	pullOptions := docker.PullImageOptions{
 		Repository:   *repository,
-		Registry:     "quay.io",
+		Registry:     *registryHost,
 		Tag:          "latest",
 		OutputStream: &LoggingWriter{},
 	}
@@ -455,10 +455,10 @@ func main() {
 	}
 
 	if *baseImage == "" && *baseLayer == "" {
-		log.Infof("Missing base-image and base-layer-id flag; Dynamically assinging base-layer-id")
+		log.Infoln("Missing base-image and base-layer-id flag; Dynamically assigning base-layer-id")
 		grabID, err := dockerClient.ImageHistory(*repository)
 		if err != nil {
-			log.Fatalln("Failed grab image ID: %v", err)
+			log.Fatalf("Failed to grab image ID: %v", err)
 		}
 		log.Infof("Assigning base-layer-id to %s", grabID[0].ID)
 		*baseLayer = grabID[0].ID
@@ -515,12 +515,10 @@ func runMonitor() {
 					healthy = false
 					return
 				}
+				if !verifyDockerClient(dockerClient) {
+					return
+				}
 			}
-
-			if !verifyDockerClient(dockerClient) {
-				return
-			}
-
 			if strings.ToLower(os.Getenv("UNDER_DOCKER")) != "true" {
 				log.Infof("Clearing all containers")
 				if !clearAllContainers(dockerClient) {

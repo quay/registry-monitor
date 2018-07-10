@@ -525,10 +525,11 @@ func runMonitor() {
 					return
 				}
 			}
-
-			log.Infof("Clearing all images")
-			if !clearAllImages(dockerClient) {
-				return
+			if strings.ToLower(os.Getenv("UNDER_DOCKER")) != "true" {
+				log.Infof("Clearing all images")
+				if !clearAllImages(dockerClient) {
+					return
+				}
 			}
 
 			log.Infof("Pulling test image")

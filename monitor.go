@@ -491,8 +491,9 @@ func main() {
 func runMonitor() {
 	firstLoop := true
 	healthy = true
+	duration := 120 * time.Second
 	mainLoop := func() {
-		duration, err := time.ParseDuration(*testInterval)
+		userDuration, err := time.ParseDuration(*testInterval)
 		if err != nil {
 			log.Fatalf("Failed to parse time interval: %v", err)
 		}
@@ -589,7 +590,7 @@ func runMonitor() {
 			promPushMetric.Observe(time.Since(pushStartTime).Seconds())
 
 			log.Infof("Test successful")
-			duration = 2 * time.Minute
+			duration = userDuration
 
 			// Write the success metric.
 			m, err := promSuccessMetric.GetMetricWithLabelValues()

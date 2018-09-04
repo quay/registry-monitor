@@ -41,7 +41,7 @@ var cloudwatchRegion = flag.String("cloudwatch-region", "us-east-1", "Region in 
 var cloudwatchNamespace = flag.String("cloudwatch-namespace", "", "Namespace in which to write the CloudWatch metrics")
 var cloudwatchSuccessMetric = flag.String("cloudwatch-metric-success", "MonitorSuccess", "Name of the CloudWatch metric for successful operations")
 var cloudwatchFailureMetric = flag.String("cloudwatch-metric-failure", "MonitorFailure", "Name of the CloudWatch metric for successful operations")
-var cloudwatchPullTimeMetric = flag.String("cloudwatch-metric-pull-time", "MonitorPushTime", "Name of the CloudWatch metric for pull timing")
+var cloudwatchPullTimeMetric = flag.String("cloudwatch-metric-pull-time", "MonitorPullTime", "Name of the CloudWatch metric for pull timing")
 var cloudwatchPushTimeMetric = flag.String("cloudwatch-metric-push-time", "MonitorPushTime", "Name of the CloudWatch metric for push timing")
 
 var (

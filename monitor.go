@@ -12,6 +12,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/cloudwatch"
+
 	"github.com/coreos/pkg/flagutil"
 	"github.com/fsouza/go-dockerclient"
 	"github.com/prometheus/client_golang/prometheus"
@@ -29,6 +34,15 @@ var baseImage = flag.String("base-image", "", "Repository to use as base image f
 var publicBase = flag.Bool("public-base", false, "Is the base image public or private (default: false)")
 var baseLayer = flag.String("base-layer-id", "", "Docker V1 ID of the base layer in the repository; instead of base-image")
 var testInterval = flag.String("run-test-every", "2m", "the time between test in minutes")
+
+var awsAccessKey = flag.String("aws-access-key", "", "AWS Access Key for connecting to CloudWatch")
+var awsSecretKey = flag.String("aws-secret-key", "", "AWS Secret Key for connecting to CloudWatch")
+var cloudwatchRegion = flag.String("cloudwatch-region", "us-east-1", "Region in which to write the CloudWatch metrics")
+var cloudwatchNamespace = flag.String("cloudwatch-namespace", "", "Namespace in which to write the CloudWatch metrics")
+var cloudwatchSuccessMetric = flag.String("cloudwatch-metric-success", "MonitorSuccess", "Name of the CloudWatch metric for successful operations")
+var cloudwatchFailureMetric = flag.String("cloudwatch-metric-failure", "MonitorFailure", "Name of the CloudWatch metric for successful operations")
+var cloudwatchPullTimeMetric = flag.String("cloudwatch-metric-pull-time", "MonitorPushTime", "Name of the CloudWatch metric for pull timing")
+var cloudwatchPushTimeMetric = flag.String("cloudwatch-metric-push-time", "MonitorPushTime", "Name of the CloudWatch metric for push timing")
 
 var (
 	base         string
@@ -488,6 +502,57 @@ func main() {
 	log.Fatal(http.ListenAndServe(*listen, nil))
 }
 
+func putCloudWatchMetric(metricName string, watchService *cloudwatch.CloudWatch, unitName string, metricValue float64) {
+	if watchService == nil {
+		return
+	}
+
+	params := &cloudwatch.PutMetricDataInput{
+		MetricData: []*cloudwatch.MetricDatum{
+			&cloudwatch.MetricDatum{
+				MetricName: aws.String(metricName),
+				Timestamp:  aws.Time(time.Now()),
+				Unit:       aws.String(unitName),
+				Value:      aws.Float64(metricValue),
+			},
+		},
+		Namespace: aws.String(*cloudwatchNamespace),
+	}
+
+	_, err := watchService.PutMetricData(params)
+	if err != nil {
+		log.Printf("Failure to put cloudwatch metric: %s", err)
+	}
+}
+
+func reportSuccess(watchService *cloudwatch.CloudWatch) {
+	m, err := promSuccessMetric.GetMetricWithLabelValues()
+	if err != nil {
+		panic(err)
+	}
+	m.Inc()
+	putCloudWatchMetric(*cloudwatchSuccessMetric, watchService, "Count", 1)
+}
+
+func reportFailure(watchService *cloudwatch.CloudWatch) {
+	m, err := promFailureMetric.GetMetricWithLabelValues()
+	if err != nil {
+		panic(err)
+	}
+	m.Inc()
+	putCloudWatchMetric(*cloudwatchFailureMetric, watchService, "Count", 1)
+}
+
+func reportPushTime(watchService *cloudwatch.CloudWatch, duration time.Duration) {
+	promPushMetric.Observe(duration.Seconds())
+	putCloudWatchMetric(*cloudwatchPushTimeMetric, watchService, "Seconds", duration.Seconds())
+}
+
+func reportPullTime(watchService *cloudwatch.CloudWatch, duration time.Duration) {
+	promPullMetric.Observe(duration.Seconds())
+	putCloudWatchMetric(*cloudwatchPullTimeMetric, watchService, "Seconds", duration.Seconds())
+}
+
 func runMonitor() {
 	firstLoop := true
 	healthy = true
@@ -496,6 +561,14 @@ func runMonitor() {
 		userDuration, err := time.ParseDuration(*testInterval)
 		if err != nil {
 			log.Fatalf("Failed to parse time interval: %v", err)
+		}
+
+		var cloudwatchService *cloudwatch.CloudWatch
+		if *awsAccessKey != "" && *awsSecretKey != "" && *cloudwatchNamespace != "" {
+			log.Infof("Configuring CloudWatch metrics reporting")
+			aws_creds := credentials.NewStaticCredentials(*awsAccessKey, *awsSecretKey, "")
+			sess, _ := session.NewSession(&aws.Config{Region: aws.String(*cloudwatchRegion), Credentials: aws_creds})
+			cloudwatchService = cloudwatch.New(sess)
 		}
 
 		for {
@@ -539,17 +612,12 @@ func runMonitor() {
 				duration = 30 * time.Second
 
 				// Write the failure metric.
-				m, err := promFailureMetric.GetMetricWithLabelValues()
-				if err != nil {
-					panic(err)
-				}
-
-				m.Inc()
+				reportFailure(cloudwatchService)
 				continue
 			}
 
 			// Write the pull time metric.
-			promPullMetric.Observe(time.Since(pullStartTime).Seconds())
+			reportPullTime(cloudwatchService, time.Since(pullStartTime))
 
 			if *baseImage != "" {
 				log.Infof("Pulling specified base image")
@@ -576,29 +644,18 @@ func runMonitor() {
 			if !pushTestImage(dockerClient) {
 				duration = 30 * time.Second
 				// Write the failure metric.
-				m, err := promFailureMetric.GetMetricWithLabelValues()
-				if err != nil {
-					panic(err)
-				}
-
-				m.Inc()
-
+				reportFailure(cloudwatchService)
 				continue
 			}
 
 			// Write the push time metric.
-			promPushMetric.Observe(time.Since(pushStartTime).Seconds())
+			reportPushTime(cloudwatchService, time.Since(pushStartTime))
 
 			log.Infof("Test successful")
 			duration = userDuration
 
 			// Write the success metric.
-			m, err := promSuccessMetric.GetMetricWithLabelValues()
-			if err != nil {
-				panic(err)
-			}
-
-			m.Inc()
+			reportSuccess(cloudwatchService)
 		}
 	}
 

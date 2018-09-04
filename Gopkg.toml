@@ -27,7 +27,7 @@
 
 [[constraint]]
   name = "github.com/fsouza/go-dockerclient"
-  version = "1.0.0"
+  version = "1.2.2"
 
 [[constraint]]
   name = "github.com/prometheus/client_golang"
@@ -36,3 +36,11 @@
 [[constraint]]
   name = "github.com/sirupsen/logrus"
   version = "1.0.3"
+
+[[constraint]]
+  name = "github.com/aws/aws-sdk-go"
+  version = "1.15.26"
+
+[[override]]
+  name = "github.com/docker/docker"
+  revision = "a422774e593b33bd287d9890544ad9e09b380d8c"

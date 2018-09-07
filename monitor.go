@@ -234,7 +234,7 @@ func clearAllImages(dockerClient *docker.Client) bool {
 		}
 
 		if !imagesFound {
-			return false
+			return true
 		}
 
 		// Remove images.

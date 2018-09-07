@@ -163,7 +163,6 @@ func verifyDockerClient(dockerClient *docker.Client) bool {
 	log.Infof("Trying to connect to Docker client")
 	if err := dockerClient.Ping(); err != nil {
 		log.Errorf("Error connecting to Docker client: %s", err)
-		healthy = false
 		return false
 	}
 
@@ -180,7 +179,6 @@ func clearAllContainers(dockerClient *docker.Client) bool {
 	containers, err := dockerClient.ListContainers(listOptions)
 	if err != nil {
 		log.Errorf("Error listing containers: %s", err)
-		healthy = false
 		return false
 	}
 
@@ -198,12 +196,11 @@ func clearAllContainers(dockerClient *docker.Client) bool {
 
 		if err = dockerClient.RemoveContainer(removeOptions); err != nil {
 			log.Errorf("Error removing container: %s", err)
-			healthy = false
 			return false
 		}
 	}
 
-	return healthy
+	return true
 }
 
 func clearAllImages(dockerClient *docker.Client) bool {
@@ -223,7 +220,6 @@ func clearAllImages(dockerClient *docker.Client) bool {
 		images, err := dockerClient.ListImages(listOptions)
 		if err != nil {
 			log.Errorf("Could not list images: %s", err)
-			healthy = false
 			return false
 		}
 
@@ -238,7 +234,7 @@ func clearAllImages(dockerClient *docker.Client) bool {
 		}
 
 		if !imagesFound {
-			return healthy
+			return false
 		}
 
 		// Remove images.
@@ -252,7 +248,6 @@ func clearAllImages(dockerClient *docker.Client) bool {
 			if err = dockerClient.RemoveImage(image.ID); err != nil {
 				if strings.ToLower(os.Getenv("UNDER_DOCKER")) != "true" {
 					log.Errorf("%s", err)
-					healthy = false
 					return false
 				} else {
 					log.Warningf("Skipping deleting image %v", image.ID)
@@ -287,7 +282,6 @@ func pullTestImage(dockerClient *docker.Client) bool {
 
 	if err := dockerClient.PullImage(pullOptions, pullAuth); err != nil {
 		log.Errorf("Pull Error: %s", err)
-		status = false
 		return false
 	}
 
@@ -313,7 +307,6 @@ func pullBaseImage(dockerClient *docker.Client) bool {
 
 	if err := dockerClient.PullImage(pullOptions, pullAuth); err != nil {
 		log.Errorf("Pull Error: %s", err)
-		status = false
 		return false
 	}
 
@@ -324,7 +317,6 @@ func deleteTopLayer(dockerClient *docker.Client) bool {
 	imageHistory, err := dockerClient.ImageHistory(*repository)
 	if err != nil && err != docker.ErrNoSuchImage {
 		log.Errorf("%s", err)
-		healthy = false
 		return false
 	}
 
@@ -333,7 +325,6 @@ func deleteTopLayer(dockerClient *docker.Client) bool {
 			log.Infof("Deleting image %s", image.ID)
 			if err = dockerClient.RemoveImage(image.ID); err != nil {
 				log.Errorf("%s", err)
-				healthy = false
 				return false
 			}
 			break
@@ -362,7 +353,6 @@ func createTagLayer(dockerClient *docker.Client) bool {
 
 	if _, err := dockerClient.CreateContainer(options); err != nil {
 		log.Errorf("Error creating container: %s", err)
-		healthy = false
 		return false
 	}
 
@@ -375,7 +365,6 @@ func createTagLayer(dockerClient *docker.Client) bool {
 
 	if _, err := dockerClient.CommitContainer(commitOptions); err != nil {
 		log.Errorf("Error committing Container: %s", err)
-		healthy = false
 		return false
 	}
 
@@ -388,11 +377,10 @@ func createTagLayer(dockerClient *docker.Client) bool {
 
 	if err := dockerClient.RemoveContainer(removeOptions); err != nil {
 		log.Errorf("Error removing container: %s", err)
-		healthy = false
 		return false
 	}
 
-	return healthy
+	return true
 }
 
 func pushTestImage(dockerClient *docker.Client) bool {
@@ -410,11 +398,9 @@ func pushTestImage(dockerClient *docker.Client) bool {
 
 	if err := dockerClient.PushImage(pushOptions, pushAuth); err != nil {
 		log.Errorf("Push Error: %s", err)
-		status = false
 		return false
 	}
 
-	status = true
 	return true
 }
 
@@ -526,6 +512,7 @@ func putCloudWatchMetric(metricName string, watchService *cloudwatch.CloudWatch,
 }
 
 func reportSuccess(watchService *cloudwatch.CloudWatch) {
+	status = true
 	m, err := promSuccessMetric.GetMetricWithLabelValues()
 	if err != nil {
 		panic(err)
@@ -535,6 +522,7 @@ func reportSuccess(watchService *cloudwatch.CloudWatch) {
 }
 
 func reportFailure(watchService *cloudwatch.CloudWatch) {
+	status = false
 	m, err := promFailureMetric.GetMetricWithLabelValues()
 	if err != nil {
 		panic(err)
@@ -589,19 +577,25 @@ func runMonitor() {
 					healthy = false
 					return
 				}
+
 				if !verifyDockerClient(dockerClient) {
+					healthy = false
 					return
 				}
 			}
+
 			if strings.ToLower(os.Getenv("UNDER_DOCKER")) != "true" {
 				log.Infof("Clearing all containers")
 				if !clearAllContainers(dockerClient) {
+					healthy = false
 					return
 				}
 			}
+
 			if strings.ToLower(os.Getenv("UNDER_DOCKER")) != "true" {
 				log.Infof("Clearing all images")
 				if !clearAllImages(dockerClient) {
+					healthy = false
 					return
 				}
 			}
@@ -610,8 +604,6 @@ func runMonitor() {
 			pullStartTime := time.Now()
 			if !pullTestImage(dockerClient) {
 				duration = 30 * time.Second
-
-				// Write the failure metric.
 				reportFailure(cloudwatchService)
 				continue
 			}
@@ -622,8 +614,10 @@ func runMonitor() {
 			if *baseImage != "" {
 				log.Infof("Pulling specified base image")
 				if !pullBaseImage(dockerClient) {
+					healthy = false
 					return
 				}
+
 				base = *baseImage
 			} else {
 				base = *baseLayer
@@ -631,11 +625,13 @@ func runMonitor() {
 
 			log.Infof("Deleting top layer")
 			if !deleteTopLayer(dockerClient) {
+				healthy = false
 				return
 			}
 
 			log.Infof("Creating new top layer")
 			if !createTagLayer(dockerClient) {
+				healthy = false
 				return
 			}
 
@@ -643,7 +639,6 @@ func runMonitor() {
 			pushStartTime := time.Now()
 			if !pushTestImage(dockerClient) {
 				duration = 30 * time.Second
-				// Write the failure metric.
 				reportFailure(cloudwatchService)
 				continue
 			}

@@ -18,8 +18,9 @@ import (
 	"github.com/aws/aws-sdk-go/service/cloudwatch"
 
 	"github.com/coreos/pkg/flagutil"
-	"github.com/fsouza/go-dockerclient"
+	docker "github.com/fsouza/go-dockerclient"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -475,7 +476,7 @@ func main() {
 	}
 
 	// Setup the HTTP server.
-	http.Handle("/metrics", prometheus.Handler())
+	http.Handle("/metrics", promhttp.Handler())
 	http.HandleFunc("/health", healthHandler)
 	http.HandleFunc("/status", statusHandler)
 

@@ -1,0 +1,95 @@
+---
+apiVersion: v1
+kind: Template
+metadata:
+  name: ${{NAME}}
+objects:
+- apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: ${{NAME}}
+  spec:
+    replicas: 1
+    minReadySeconds: ${{MIN_READY_SECONDS}}
+    progressDeadlineSeconds: ${{PROGRESS_DEADLINE_SECONDS}}
+    revisionHistoryLimit: 3
+    strategy:
+      type: "RollingUpdate"
+      rollingUpdate:
+        maxUnavailable: 0
+        maxSurge: 1
+    selector:
+      matchLabels:
+        app: ${{NAME}}
+    template:
+      metadata:
+        labels:
+          app: ${{NAME}}
+        annotations:
+          deploymentUpdateId: ${{DEPLOYMENT_UPDATE_ID}}
+      spec:
+        serviceAccount: ${{NAME}}
+        automountServiceAccountToken: false
+        securityContext:
+          runAsUser: 0
+        containers:
+        - name: ${{NAME}}
+          image: ${IMAGE}:${IMAGE_TAG}
+          imagePullPolicy: ${{IMAGE_PULL_POLICY}}
+          securityContext:
+            privileged: true
+          args:
+          - "tbd"
+          env:
+          - name: UNDER_DOCKER
+            value: true
+          ports:
+          - containerPort: ${{CONTAINER_PORT}}
+          resources:
+            limits:
+              cpu: ${{CPU_LIMIT}}
+              memory: ${{MEMORY_LIMIT}}
+            requests:
+              cpu: ${{CPU_REQUEST}}
+              memory: ${{MEMORY_REQUEST}}
+          livenessProbe:
+            httpGet:
+              path: /
+              port: ${{CONTAINER_PORT}}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /
+              port: ${{CONTAINER_PORT}}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 15
+parameters:
+- name: NAME
+  value: "registry-monitor"
+- name: IMAGE
+  value: ""
+- name: IMAGE_TAG
+  value: "latest"
+- name: MIN_READY_SECONDS
+  value: "30"
+- name: PROGRESS_DEADLINE_SECONDS
+  value: "300"
+- name: REVISION_HISTORY_LIMITS
+  value: "3"
+- name: DEPLOYMENT_UPDATE_ID
+  value: "update_me_to_trigger_new_deployment_without_code_change"
+- name: CONTAINER_PORT
+  value: "8000"
+- name: LISTEN_PORT
+  value: ":8000"
+- name: CPU_LIMIT
+  value: "1"
+- name: CPU_REQUEST
+  value: "1"
+- name: MEMORY_LIMIT
+  value: "4G"
+- name: MEMORY_REQUEST
+  value: "4G"

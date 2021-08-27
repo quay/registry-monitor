@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"flag"
@@ -11,6 +12,11 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/containers/podman/v3/pkg/bindings"
+	"github.com/containers/podman/v3/pkg/bindings/containers"
+	"github.com/containers/podman/v3/pkg/bindings/images"
+	"github.com/containers/podman/v3/pkg/specgen"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
@@ -27,8 +33,8 @@ import (
 
 var listen = flag.String("listen", ":8000", "")
 var level = flag.String("loglevel", "info", "default log level: debug, info, warn, error, fatal, panic")
-var dockerUsername = flag.String("username", "", "Registry username for pulling and pushing")
-var dockerPassword = flag.String("password", "", "Registry password for pulling and pushing")
+var username = flag.String("username", "", "Registry username for pulling and pushing")
+var password = flag.String("password", "", "Registry password for pulling and pushing")
 var registryHost = flag.String("registry-host", "", "Hostname of the registry being monitored")
 var repository = flag.String("repository", "", "Repository on the registry to pull and push")
 var baseImage = flag.String("base-image", "", "Repository to use as base image for push image; instead of base-layer-id")
@@ -51,6 +57,7 @@ var (
 	dockerHost   string
 	healthy      bool
 	status       bool
+	podmanContext context.Context
 )
 
 var (
@@ -139,16 +146,17 @@ func buildTLSTransport(basePath string) (*http.Transport, error) {
 	}, nil
 }
 
-func newDockerClient() (*docker.Client, error) {
-	if os.Getenv("DOCKER_CERT_PATH") == "" {
-		return docker.NewClient(dockerHost)
+func newPodmanClient() (context.Context, error) {
+
+	socket := "ssh://vagrant@127.0.0.1:2222/run/user/1000/podman/podman.sock"
+	absPath, _ := filepath.Abs("opensshkey")
+
+	podmanContext, err := bindings.NewConnectionWithIdentity(context.Background(), socket, absPath)
+	if err != nil {
+		return nil, err
 	}
 
-	cert_path := os.Getenv("DOCKER_CERT_PATH")
-	ca := fmt.Sprintf("%s/ca.pem", cert_path)
-	cert := fmt.Sprintf("%s/cert.pem", cert_path)
-	key := fmt.Sprintf("%s/key.pem", cert_path)
-	return docker.NewTLSClient(dockerHost, cert, key, ca)
+	return podmanContext, nil
 }
 
 func stringInSlice(value string, list []string) bool {
@@ -158,17 +166,6 @@ func stringInSlice(value string, list []string) bool {
 		}
 	}
 	return false
-}
-
-func verifyDockerClient(dockerClient *docker.Client) bool {
-	log.Infof("Trying to connect to Docker client")
-	if err := dockerClient.Ping(); err != nil {
-		log.Errorf("Error connecting to Docker client: %s", err)
-		return false
-	}
-
-	log.Infof("Docker client valid")
-	return true
 }
 
 func clearAllContainers(dockerClient *docker.Client) bool {
@@ -268,20 +265,20 @@ func clearAllImages(dockerClient *docker.Client) bool {
 	return true
 }
 
-func pullTestImage(dockerClient *docker.Client) bool {
-	pullOptions := docker.PullImageOptions{
-		Repository:   *repository,
-		Registry:     *registryHost,
-		Tag:          "latest",
-		OutputStream: &LoggingWriter{},
+func pullTestImage(podmanContext context.Context) bool {
+	fullImagePath := imagePath(*repository)
+	var pullOptions *images.PullOptions
+	if *publicBase {
+		pullOptions = &images.PullOptions{}
+	} else {
+		pullOptions = &images.PullOptions{
+			Username: username,
+			Password: password,
+		}
 	}
-
-	pullAuth := docker.AuthConfiguration{
-		Username: *dockerUsername,
-		Password: *dockerPassword,
-	}
-
-	if err := dockerClient.PullImage(pullOptions, pullAuth); err != nil {
+	
+	fmt.Println("Pulling test image...")
+	if _, err := images.Pull(podmanContext, fullImagePath, pullOptions); err != nil {
 		log.Errorf("Pull Error: %s", err)
 		return false
 	}
@@ -289,24 +286,36 @@ func pullTestImage(dockerClient *docker.Client) bool {
 	return true
 }
 
-func pullBaseImage(dockerClient *docker.Client) bool {
-	pullOptions := docker.PullImageOptions{
-		Repository:   *baseImage,
-		Tag:          "latest",
-		OutputStream: &LoggingWriter{},
-	}
+func imagePath(repository string) string {
+	fullRepoPath := strings.Join([]string{repository, "latest"}, ":")
+	return fullRepoPath
+}
 
-	var pullAuth docker.AuthConfiguration
-	if *publicBase {
-		pullAuth = docker.AuthConfiguration{}
+func fullImageRef(registry, repository, baseImage string) string {
+	if baseImage != "" {
+		imagePath := imagePath(baseImage) 
+		fullImageRef := strings.Join([]string{registry, repository, imagePath}, "/")
+		return fullImageRef
 	} else {
-		pullAuth = docker.AuthConfiguration{
-			Username: *dockerUsername,
-			Password: *dockerPassword,
+		imagePath := imagePath(repository)
+		fullImageRef := strings.Join([]string{registry, imagePath}, "/")
+		return fullImageRef
+	}
+}
+
+func pullBaseImage(podmanContext context.Context) bool {
+	fullImagePath := fullImageRef(*registryHost, *repository, *baseImage)
+	var pullOptions *images.PullOptions
+	if *publicBase {
+		pullOptions = &images.PullOptions{}
+	} else {
+		pullOptions = &images.PullOptions{
+			Username: username,
+			Password: password,
 		}
 	}
 
-	if err := dockerClient.PullImage(pullOptions, pullAuth); err != nil {
+	if _, err := images.Pull(podmanContext, fullImagePath, pullOptions); err != nil {
 		log.Errorf("Pull Error: %s", err)
 		return false
 	}
@@ -314,9 +323,10 @@ func pullBaseImage(dockerClient *docker.Client) bool {
 	return true
 }
 
-func deleteTopLayer(dockerClient *docker.Client) bool {
-	imageHistory, err := dockerClient.ImageHistory(*repository)
-	if err != nil && err != docker.ErrNoSuchImage {
+func deleteTopLayer(podmanContext context.Context) bool {
+	var historyOptions *images.HistoryOptions
+	imageHistory, err := images.History(podmanContext, *baseLayer, historyOptions)
+	if err != nil {
 		log.Errorf("%s", err)
 		return false
 	}
@@ -324,7 +334,10 @@ func deleteTopLayer(dockerClient *docker.Client) bool {
 	for _, image := range imageHistory {
 		if stringInSlice("latest", image.Tags) {
 			log.Infof("Deleting image %s", image.ID)
-			if err = dockerClient.RemoveImage(image.ID); err != nil {
+			var imagesToRemove []string
+			imagesToRemove[0] = image.ID
+			_, err := images.Remove(podmanContext, imagesToRemove, &images.RemoveOptions{})
+			if err != nil {
 				log.Errorf("%s", err)
 				return false
 			}
@@ -335,48 +348,37 @@ func deleteTopLayer(dockerClient *docker.Client) bool {
 	return healthy
 }
 
-func createTagLayer(dockerClient *docker.Client) bool {
-	t := time.Now().Local()
-	timestamp := t.Format("2006-01-02 15:04:05 -0700")
-
-	config := &docker.Config{
-		Image: base,
-		Cmd:   []string{"sh", "echo", "\"" + timestamp + "\" > foo"},
-	}
-
+func createTagLayer(podmanContext context.Context) bool {
 	container_name := fmt.Sprintf("updatedcontainer%v", time.Now().Unix())
 	log.Infof("Creating new image via container %v", container_name)
 
-	options := docker.CreateContainerOptions{
-		Name:   container_name,
-		Config: config,
+	
+	s := specgen.NewSpecGenerator(fullImageRef(*registryHost, *repository, *baseImage), false)
+	s.Name = container_name
+	createdResponse, err := containers.CreateWithSpec(podmanContext, s, nil)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
 	}
+	fmt.Println("Container created.")
 
-	if _, err := dockerClient.CreateContainer(options); err != nil {
-		log.Errorf("Error creating container: %s", err)
-		return false
-	}
-
-	commitOptions := docker.CommitContainerOptions{
-		Container:  container_name,
-		Repository: *repository,
-		Tag:        "latest",
-		Message:    "Updated at " + timestamp,
-	}
-
-	if _, err := dockerClient.CommitContainer(commitOptions); err != nil {
+	var commitOptions *containers.CommitOptions
+	if _, err := containers.Commit(podmanContext, createdResponse.ID, commitOptions); err != nil {
 		log.Errorf("Error committing Container: %s", err)
 		return false
 	}
 
-	log.Infof("Removing container: %s", container_name)
-	removeOptions := docker.RemoveContainerOptions{
-		ID:            container_name,
-		RemoveVolumes: true,
-		Force:         true,
+	if err := containers.Start(podmanContext, createdResponse.ID, nil); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
 	}
+	fmt.Println("Container started.")
 
-	if err := dockerClient.RemoveContainer(removeOptions); err != nil {
+	log.Infof("Removing container: %s", createdResponse.ID)
+
+	signal := "SIGKILL"
+	var killOptions = &containers.KillOptions{Signal: &signal}
+	if err := containers.Kill(podmanContext, createdResponse.ID, killOptions); err != nil {
 		log.Errorf("Error removing container: %s", err)
 		return false
 	}
@@ -384,20 +386,14 @@ func createTagLayer(dockerClient *docker.Client) bool {
 	return true
 }
 
-func pushTestImage(dockerClient *docker.Client) bool {
-	pushOptions := docker.PushImageOptions{
-		Name:         *repository,
-		Registry:     *registryHost,
-		Tag:          "latest",
-		OutputStream: &LoggingWriter{},
+func pushTestImage(podmanContext context.Context) bool {
+	pushOptions := &images.PushOptions{
+		Username: username,
+		Password: password,
 	}
 
-	pushAuth := docker.AuthConfiguration{
-		Username: *dockerUsername,
-		Password: *dockerPassword,
-	}
-
-	if err := dockerClient.PushImage(pushOptions, pushAuth); err != nil {
+	source := fullImageRef(*registryHost, *repository, "")
+	if err := images.Push(podmanContext, source, source, pushOptions); err != nil {
 		log.Errorf("Push Error: %s", err)
 		return false
 	}
@@ -406,13 +402,10 @@ func pushTestImage(dockerClient *docker.Client) bool {
 }
 
 func init() {
-	dockerHost = os.Getenv("DOCKER_HOST")
-	if dockerHost == "" {
-		dockerHost = "unix:///var/run/docker.sock"
-	}
 
+	fmt.Println("init")
 	var err error
-	dockerClient, err = newDockerClient()
+	_, err = newPodmanClient()
 	if err != nil {
 		log.Fatalf("%s", err)
 	}
@@ -422,16 +415,19 @@ func init() {
 func main() {
 	// Parse the command line flags.
 	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
+		fmt.Println("1")
 		fmt.Fprintln(os.Stderr, err.Error())
 		os.Exit(1)
 	}
 	if err := flagutil.SetFlagsFromEnv(flag.CommandLine, "REGISTRY_MONITOR"); err != nil {
+		fmt.Println("2")
 		fmt.Fprintln(os.Stderr, err.Error())
 		os.Exit(1)
 	}
 
 	lvl, err := log.ParseLevel(*level)
 	if err != nil {
+		fmt.Println("3")
 		fmt.Fprintln(os.Stderr, err.Error())
 		os.Exit(1)
 	}
@@ -439,11 +435,11 @@ func main() {
 	log.SetLevel(lvl)
 
 	// Ensure we have proper values.
-	if *dockerUsername == "" {
+	if *username == "" {
 		log.Fatalln("Missing username flag")
 	}
 
-	if *dockerPassword == "" {
+	if *password == "" {
 		log.Fatalln("Missing password flag")
 	}
 
@@ -455,9 +451,11 @@ func main() {
 		log.Fatalln("Missing repository flag")
 	}
 
+	// TODO 
 	if *baseImage == "" && *baseLayer == "" {
 		log.Infoln("Missing base-image and base-layer-id flag; Dynamically assigning base-layer-id")
-		grabID, err := dockerClient.ImageHistory(*repository)
+		grabID, err := images.History(podmanContext, *repository, &images.HistoryOptions{})
+		// grabID, err := dockerClient.ImageHistory(*repository)
 		if err != nil {
 			log.Fatalf("Failed to grab image ID: %v", err)
 		}
@@ -486,6 +484,7 @@ func main() {
 	runMonitor()
 
 	// Listen and serve.
+	fmt.Println("listen and server")
 	log.Fatal(http.ListenAndServe(*listen, nil))
 }
 
@@ -510,6 +509,7 @@ func putCloudWatchMetric(metricName string, watchService *cloudwatch.CloudWatch,
 	if err != nil {
 		log.Printf("Failure to put cloudwatch metric: %s", err)
 	}
+	log.Printf("Reports to cloudwatch success")
 }
 
 func reportSuccess(watchService *cloudwatch.CloudWatch) {
@@ -570,40 +570,11 @@ func runMonitor() {
 			firstLoop = false
 			status = true
 
-			if dockerClient == nil || !verifyDockerClient(dockerClient) {
-				log.Infof("Trying docker host: %s", dockerHost)
-				dockerClient, err = newDockerClient()
-				if err != nil {
-					log.Errorf("%s", err)
-					healthy = false
-					return
-				}
-
-				if !verifyDockerClient(dockerClient) {
-					healthy = false
-					return
-				}
-			}
-
-			if strings.ToLower(os.Getenv("UNDER_DOCKER")) != "true" {
-				log.Infof("Clearing all containers")
-				if !clearAllContainers(dockerClient) {
-					healthy = false
-					return
-				}
-			}
-
-			if strings.ToLower(os.Getenv("UNDER_DOCKER")) != "true" {
-				log.Infof("Clearing all images")
-				if !clearAllImages(dockerClient) {
-					healthy = false
-					return
-				}
-			}
+			podmanContext, err = newPodmanClient()
 
 			log.Infof("Pulling test image")
 			pullStartTime := time.Now()
-			if !pullTestImage(dockerClient) {
+			if !pullTestImage(podmanContext) {
 				duration = 30 * time.Second
 				reportFailure(cloudwatchService)
 				continue
@@ -614,7 +585,7 @@ func runMonitor() {
 
 			if *baseImage != "" {
 				log.Infof("Pulling specified base image")
-				if !pullBaseImage(dockerClient) {
+				if !pullBaseImage(podmanContext) {
 					healthy = false
 					return
 				}
@@ -625,20 +596,20 @@ func runMonitor() {
 			}
 
 			log.Infof("Deleting top layer")
-			if !deleteTopLayer(dockerClient) {
+			if !deleteTopLayer(podmanContext) {
 				healthy = false
 				return
 			}
 
 			log.Infof("Creating new top layer")
-			if !createTagLayer(dockerClient) {
+			if !createTagLayer(podmanContext) {
 				healthy = false
 				return
 			}
 
 			log.Infof("Pushing test image")
 			pushStartTime := time.Now()
-			if !pushTestImage(dockerClient) {
+			if !pushTestImage(podmanContext) {
 				duration = 30 * time.Second
 				reportFailure(cloudwatchService)
 				continue
